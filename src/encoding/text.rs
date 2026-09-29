@@ -42,7 +42,7 @@ use crate::encoding::{
 };
 use crate::metrics::exemplar::Exemplar;
 use crate::metrics::MetricType;
-use crate::registry::{Prefix, Registry, Unit};
+use crate::registry::{EncodeRegistry, Prefix, Unit};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -86,7 +86,7 @@ use std::fmt::Write;
 /// encode(&mut buffer, &registry)?;
 /// # Ok::<(), std::fmt::Error>(())
 /// ```
-pub fn encode<W>(writer: &mut W, registry: &Registry) -> Result<(), std::fmt::Error>
+pub fn encode<W>(writer: &mut W, registry: &impl EncodeRegistry) -> Result<(), std::fmt::Error>
 where
     W: Write,
 {
@@ -140,11 +140,15 @@ where
 /// encode_registry(&mut buffer, &reg_gauge)?;
 /// # Ok::<(), std::fmt::Error>(())
 /// ```
-pub fn encode_registry<W>(writer: &mut W, registry: &Registry) -> Result<(), std::fmt::Error>
+pub fn encode_registry<W>(
+    writer: &mut W,
+    registry: &impl EncodeRegistry,
+) -> Result<(), std::fmt::Error>
 where
     W: Write,
 {
-    registry.encode(&mut DescriptorEncoder::new(writer).into())
+    let mut descriptor_encoder = DescriptorEncoder::new(writer).into();
+    registry.encode_into(&mut descriptor_encoder)
 }
 
 /// Encode the EOF marker into the provided [`Write`]r using the OpenMetrics
@@ -314,6 +318,20 @@ impl std::fmt::Debug for MetricEncoder<'_> {
 }
 
 impl MetricEncoder<'_> {
+    /// Create an encoder that discards all samples written to it.
+    ///
+    /// Used for families excluded by a registry view.
+    pub(crate) fn discarded(sink: &mut String) -> MetricEncoder<'_> {
+        MetricEncoder {
+            writer: sink,
+            prefix: None,
+            name: "",
+            unit: None,
+            const_labels: &[],
+            family_labels: None,
+        }
+    }
+
     pub fn encode_counter<
         S: EncodeLabelSet,
         CounterValue: super::EncodeCounterValue,
@@ -765,6 +783,7 @@ mod tests {
     use crate::metrics::histogram::{exponential_buckets, Histogram, NativeHistogramConfig};
     use crate::metrics::info::Info;
     use crate::metrics::{counter::Counter, exemplar::CounterWithExemplar};
+    use crate::registry::Registry;
     use pyo3::{prelude::*, types::PyModule};
     use std::borrow::Cow;
     use std::fmt::Error;

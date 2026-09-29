@@ -42,7 +42,7 @@ use std::{
 };
 
 use crate::metrics::MetricType;
-use crate::registry::{Registry, Unit};
+use crate::registry::{EncodeRegistry, Unit};
 use crate::{metrics::exemplar::Exemplar, registry::Prefix};
 
 use super::{
@@ -52,17 +52,18 @@ use super::{
 /// Encode the metrics registered with the provided [`Registry`] into
 /// Prometheus `MetricFamily` messages.
 pub fn encode(
-    registry: &Registry,
+    registry: &impl EncodeRegistry,
 ) -> Result<Vec<prometheus_data_model::MetricFamily>, std::fmt::Error> {
     let mut metric_families = Vec::new();
-    let mut descriptor_encoder = DescriptorEncoder::new(&mut metric_families).into();
-    registry.encode(&mut descriptor_encoder)?;
+    let mut descriptor_encoder: crate::encoding::DescriptorEncoder =
+        DescriptorEncoder::new(&mut metric_families).into();
+    registry.encode_into(&mut descriptor_encoder)?;
     Ok(metric_families)
 }
 
 /// Encode the metrics registered with the provided [`Registry`] into a
 /// length-delimited Prometheus protobuf payload.
-pub fn encode_to_vec(registry: &Registry) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_to_vec(registry: &impl EncodeRegistry) -> Result<Vec<u8>, EncodeError> {
     let metric_families = encode(registry)?;
     let mut encoded = Vec::new();
 
@@ -237,6 +238,25 @@ pub(crate) struct MetricEncoder<'f> {
 }
 
 impl MetricEncoder<'_> {
+    /// Create an encoder that drops all samples into a scratch family list.
+    ///
+    /// Used for families excluded by a registry view.
+    pub(crate) fn discarded(
+        sink: &mut Vec<prometheus_data_model::MetricFamily>,
+    ) -> MetricEncoder<'_> {
+        MetricEncoder {
+            metric_type: MetricType::Unknown,
+            family: {
+                sink.push(Default::default());
+                &mut sink
+                    .last_mut()
+                    .expect("scratch family to be present")
+                    .metric
+            },
+            labels: Vec::new(),
+        }
+    }
+
     pub fn encode_counter<
         S: EncodeLabelSet,
         CounterValue: EncodeCounterValue,
@@ -603,7 +623,7 @@ mod tests {
         exponential_buckets, Histogram, NativeHistogramConfig, NATIVE_HISTOGRAM_ZERO_THRESHOLD_ZERO,
     };
     use crate::metrics::info::Info;
-    use crate::registry::Unit;
+    use crate::registry::{Registry, Unit};
     use std::borrow::Cow;
     use std::collections::HashSet;
     use std::sync::atomic::AtomicI64;

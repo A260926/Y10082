@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Added composable, read-only registry views via `Registry::view`. A
+  `RegistryView` can restrict an exposition to metric families matching stacked
+  name prefix, full metric name and const label conditions. Views borrow the
+  registry without copying metrics, preserve registration order and see metrics
+  registered after the view was created; each individual encode uses the stable
+  descriptor set present when it started. The text and protobuf encoders accept
+  both registries and views and select the identical family set and order.
+
 ## [0.25.1]
 
 ### Fixed

@@ -6,7 +6,7 @@ pub use prometheus_client_derive_encode::*;
 
 use crate::metrics::exemplar::Exemplar;
 use crate::metrics::MetricType;
-use crate::registry::{Prefix, Unit};
+use crate::registry::{metric_family_name, Prefix, Unit, ViewFilter};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -120,7 +120,28 @@ impl EncodeMetric for Box<dyn EncodeMetric> {
 
 /// Encoder for a Metric Descriptor.
 #[derive(Debug)]
-pub struct DescriptorEncoder<'a>(DescriptorEncoderInner<'a>);
+pub struct DescriptorEncoder<'a> {
+    inner: DescriptorEncoderInner<'a>,
+    /// Optional view filter carried through the encode.
+    ///
+    /// It is applied at the single point where a family is opened so the
+    /// text and protobuf code paths can not diverge in the selected family
+    /// set.
+    filter: Option<ViewFilter>,
+    /// Prefix currently in scope, used to evaluate the view filter.
+    prefix: Option<Prefix>,
+    /// Expanded const labels currently in scope, used to evaluate the view
+    /// filter.
+    labels: Vec<(Cow<'static, str>, Cow<'static, str>)>,
+    /// Scratch writer for families discarded by the filter (text format).
+    text_sink: String,
+    /// Scratch families for families discarded by the filter (protobuf).
+    #[cfg(feature = "openmetrics_protobuf")]
+    openmetrics_sink: Vec<openmetrics_protobuf::openmetrics_data_model::MetricFamily>,
+    /// Scratch families for families discarded by the filter (protobuf).
+    #[cfg(feature = "prometheus_protobuf")]
+    prometheus_sink: Vec<prometheus_protobuf::prometheus_data_model::MetricFamily>,
+}
 
 #[derive(Debug)]
 enum DescriptorEncoderInner<'a> {
@@ -135,37 +156,90 @@ enum DescriptorEncoderInner<'a> {
 
 impl<'a> From<text::DescriptorEncoder<'a>> for DescriptorEncoder<'a> {
     fn from(e: text::DescriptorEncoder<'a>) -> Self {
-        Self(DescriptorEncoderInner::Text(e))
+        Self {
+            inner: DescriptorEncoderInner::Text(e),
+            filter: None,
+            prefix: None,
+            labels: Vec::new(),
+            text_sink: String::new(),
+            #[cfg(feature = "openmetrics_protobuf")]
+            openmetrics_sink: Vec::new(),
+            #[cfg(feature = "prometheus_protobuf")]
+            prometheus_sink: Vec::new(),
+        }
     }
 }
 
 #[cfg(feature = "openmetrics_protobuf")]
 impl<'a> From<openmetrics_protobuf::DescriptorEncoder<'a>> for DescriptorEncoder<'a> {
     fn from(e: openmetrics_protobuf::DescriptorEncoder<'a>) -> Self {
-        Self(DescriptorEncoderInner::Protobuf(e))
+        Self {
+            inner: DescriptorEncoderInner::Protobuf(e),
+            filter: None,
+            prefix: None,
+            labels: Vec::new(),
+            text_sink: String::new(),
+            openmetrics_sink: Vec::new(),
+            #[cfg(feature = "prometheus_protobuf")]
+            prometheus_sink: Vec::new(),
+        }
     }
 }
 
 #[cfg(feature = "prometheus_protobuf")]
 impl<'a> From<prometheus_protobuf::DescriptorEncoder<'a>> for DescriptorEncoder<'a> {
     fn from(e: prometheus_protobuf::DescriptorEncoder<'a>) -> Self {
-        Self(DescriptorEncoderInner::PrometheusProtobuf(e))
+        Self {
+            inner: DescriptorEncoderInner::PrometheusProtobuf(e),
+            filter: None,
+            prefix: None,
+            labels: Vec::new(),
+            text_sink: String::new(),
+            #[cfg(feature = "openmetrics_protobuf")]
+            openmetrics_sink: Vec::new(),
+            prometheus_sink: Vec::new(),
+        }
     }
 }
 
 impl DescriptorEncoder<'_> {
+    /// Set the view filter applied while opening metric families.
+    ///
+    /// Called once per encode by [`crate::registry::RegistryView`].
+    pub(crate) fn set_filter(&mut self, filter: ViewFilter) {
+        self.filter = Some(filter);
+    }
+
     pub(crate) fn with_prefix_and_labels<'s>(
         &'s mut self,
         prefix: Option<&'s Prefix>,
         labels: &'s [(Cow<'static, str>, Cow<'static, str>)],
-        // TODO: result needed?
     ) -> DescriptorEncoder<'s> {
-        for_both_mut!(
-            self,
-            DescriptorEncoderInner,
-            e,
-            e.with_prefix_and_labels(prefix, labels).into()
-        )
+        DescriptorEncoder {
+            inner: match &mut self.inner {
+                DescriptorEncoderInner::Text(e) => {
+                    DescriptorEncoderInner::Text(e.with_prefix_and_labels(prefix, labels))
+                }
+                #[cfg(feature = "openmetrics_protobuf")]
+                DescriptorEncoderInner::Protobuf(e) => {
+                    DescriptorEncoderInner::Protobuf(e.with_prefix_and_labels(prefix, labels))
+                }
+                #[cfg(feature = "prometheus_protobuf")]
+                DescriptorEncoderInner::PrometheusProtobuf(e) => {
+                    DescriptorEncoderInner::PrometheusProtobuf(
+                        e.with_prefix_and_labels(prefix, labels),
+                    )
+                }
+            },
+            filter: self.filter.clone(),
+            prefix: prefix.cloned(),
+            labels: labels.to_vec(),
+            text_sink: String::new(),
+            #[cfg(feature = "openmetrics_protobuf")]
+            openmetrics_sink: Vec::new(),
+            #[cfg(feature = "prometheus_protobuf")]
+            prometheus_sink: Vec::new(),
+        }
     }
 
     /// Encode a descriptor.
@@ -176,12 +250,47 @@ impl DescriptorEncoder<'_> {
         unit: Option<&'s Unit>,
         metric_type: MetricType,
     ) -> Result<MetricEncoder<'s>, std::fmt::Error> {
-        for_both_mut!(
-            self,
-            DescriptorEncoderInner,
-            e,
-            Ok(e.encode_descriptor(name, help, unit, metric_type)?.into())
-        )
+        if let Some(filter) = &self.filter {
+            let full_name = metric_family_name(self.prefix.as_ref(), name, unit, metric_type);
+            if !filter.matches(&full_name, &self.labels) {
+                return Ok(self.discarded_metric_encoder());
+            }
+        }
+
+        match &mut self.inner {
+            DescriptorEncoderInner::Text(e) => {
+                Ok(e.encode_descriptor(name, help, unit, metric_type)?.into())
+            }
+            #[cfg(feature = "openmetrics_protobuf")]
+            DescriptorEncoderInner::Protobuf(e) => {
+                Ok(e.encode_descriptor(name, help, unit, metric_type)?.into())
+            }
+            #[cfg(feature = "prometheus_protobuf")]
+            DescriptorEncoderInner::PrometheusProtobuf(e) => {
+                Ok(e.encode_descriptor(name, help, unit, metric_type)?.into())
+            }
+        }
+    }
+
+    /// Build a [`MetricEncoder`] that drops everything written into it.
+    ///
+    /// Used for families rejected by a view filter. Filtering happens before
+    /// any output is produced for the family so that no `# HELP`/`# TYPE`
+    /// line or protobuf family of a rejected family ever escapes.
+    fn discarded_metric_encoder<'s>(&'s mut self) -> MetricEncoder<'s> {
+        match &mut self.inner {
+            DescriptorEncoderInner::Text(_) => {
+                text::MetricEncoder::discarded(&mut self.text_sink).into()
+            }
+            #[cfg(feature = "openmetrics_protobuf")]
+            DescriptorEncoderInner::Protobuf(_) => {
+                openmetrics_protobuf::MetricEncoder::discarded(&mut self.openmetrics_sink).into()
+            }
+            #[cfg(feature = "prometheus_protobuf")]
+            DescriptorEncoderInner::PrometheusProtobuf(_) => {
+                prometheus_protobuf::MetricEncoder::discarded(&mut self.prometheus_sink).into()
+            }
+        }
     }
 }
 

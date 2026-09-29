@@ -33,7 +33,7 @@ pub mod openmetrics_data_model {
 use std::{borrow::Cow, collections::HashMap};
 
 use crate::metrics::MetricType;
-use crate::registry::{Registry, Unit};
+use crate::registry::{EncodeRegistry, Unit};
 use crate::{metrics::exemplar::Exemplar, registry::Prefix};
 
 use super::{
@@ -42,10 +42,13 @@ use super::{
 
 /// Encode the metrics registered with the provided [`Registry`] into MetricSet
 /// using the OpenMetrics protobuf format.
-pub fn encode(registry: &Registry) -> Result<openmetrics_data_model::MetricSet, std::fmt::Error> {
+pub fn encode(
+    registry: &impl EncodeRegistry,
+) -> Result<openmetrics_data_model::MetricSet, std::fmt::Error> {
     let mut metric_set = openmetrics_data_model::MetricSet::default();
-    let mut descriptor_encoder = DescriptorEncoder::new(&mut metric_set.metric_families).into();
-    registry.encode(&mut descriptor_encoder)?;
+    let mut descriptor_encoder: crate::encoding::DescriptorEncoder =
+        DescriptorEncoder::new(&mut metric_set.metric_families).into();
+    registry.encode_into(&mut descriptor_encoder)?;
     Ok(metric_set)
 }
 
@@ -155,6 +158,25 @@ pub(crate) struct MetricEncoder<'f> {
 }
 
 impl MetricEncoder<'_> {
+    /// Create an encoder that drops all samples into a scratch family list.
+    ///
+    /// Used for families excluded by a registry view.
+    pub(crate) fn discarded(
+        sink: &mut Vec<openmetrics_data_model::MetricFamily>,
+    ) -> MetricEncoder<'_> {
+        MetricEncoder {
+            metric_type: MetricType::Unknown,
+            family: {
+                sink.push(Default::default());
+                &mut sink
+                    .last_mut()
+                    .expect("scratch family to be present")
+                    .metrics
+            },
+            labels: Vec::new(),
+        }
+    }
+
     pub fn encode_counter<
         S: EncodeLabelSet,
         CounterValue: EncodeCounterValue,
@@ -473,7 +495,7 @@ mod tests {
     use crate::metrics::gauge::Gauge;
     use crate::metrics::histogram::{exponential_buckets, Histogram, NativeHistogramConfig};
     use crate::metrics::info::Info;
-    use crate::registry::Unit;
+    use crate::registry::{Registry, Unit};
     use std::borrow::Cow;
     use std::collections::HashSet;
     use std::sync::atomic::AtomicI64;
