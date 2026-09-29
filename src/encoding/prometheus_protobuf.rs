@@ -42,27 +42,28 @@ use std::{
 };
 
 use crate::metrics::MetricType;
-use crate::registry::{Registry, Unit};
+use crate::registry::{AsRegistryRef, Unit};
 use crate::{metrics::exemplar::Exemplar, registry::Prefix};
 
 use super::{
     EncodeCounterValue, EncodeExemplarValue, EncodeGaugeValue, EncodeLabelSet, NativeHistogram,
 };
 
-/// Encode the metrics registered with the provided [`Registry`] into
-/// Prometheus `MetricFamily` messages.
-pub fn encode(
-    registry: &Registry,
+/// Encode the metrics registered with the provided [`Registry`] (or a
+/// [`crate::registry::RegistryView`] of one) into Prometheus `MetricFamily`
+/// messages.
+pub fn encode<R: AsRegistryRef + ?Sized>(
+    registry: &R,
 ) -> Result<Vec<prometheus_data_model::MetricFamily>, std::fmt::Error> {
     let mut metric_families = Vec::new();
     let mut descriptor_encoder = DescriptorEncoder::new(&mut metric_families).into();
-    registry.encode(&mut descriptor_encoder)?;
+    registry.as_registry_ref().encode(&mut descriptor_encoder)?;
     Ok(metric_families)
 }
 
 /// Encode the metrics registered with the provided [`Registry`] into a
 /// length-delimited Prometheus protobuf payload.
-pub fn encode_to_vec(registry: &Registry) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_to_vec<R: AsRegistryRef + ?Sized>(registry: &R) -> Result<Vec<u8>, EncodeError> {
     let metric_families = encode(registry)?;
     let mut encoded = Vec::new();
 
@@ -603,7 +604,7 @@ mod tests {
         exponential_buckets, Histogram, NativeHistogramConfig, NATIVE_HISTOGRAM_ZERO_THRESHOLD_ZERO,
     };
     use crate::metrics::info::Info;
-    use crate::registry::Unit;
+    use crate::registry::{Registry, Unit};
     use std::borrow::Cow;
     use std::collections::HashSet;
     use std::sync::atomic::AtomicI64;

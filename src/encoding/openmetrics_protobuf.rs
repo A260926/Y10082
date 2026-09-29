@@ -33,7 +33,7 @@ pub mod openmetrics_data_model {
 use std::{borrow::Cow, collections::HashMap};
 
 use crate::metrics::MetricType;
-use crate::registry::{Registry, Unit};
+use crate::registry::{AsRegistryRef, Unit};
 use crate::{metrics::exemplar::Exemplar, registry::Prefix};
 
 use super::{
@@ -42,10 +42,12 @@ use super::{
 
 /// Encode the metrics registered with the provided [`Registry`] into MetricSet
 /// using the OpenMetrics protobuf format.
-pub fn encode(registry: &Registry) -> Result<openmetrics_data_model::MetricSet, std::fmt::Error> {
+pub fn encode<R: AsRegistryRef + ?Sized>(
+    registry: &R,
+) -> Result<openmetrics_data_model::MetricSet, std::fmt::Error> {
     let mut metric_set = openmetrics_data_model::MetricSet::default();
     let mut descriptor_encoder = DescriptorEncoder::new(&mut metric_set.metric_families).into();
-    registry.encode(&mut descriptor_encoder)?;
+    registry.as_registry_ref().encode(&mut descriptor_encoder)?;
     Ok(metric_set)
 }
 
@@ -473,7 +475,7 @@ mod tests {
     use crate::metrics::gauge::Gauge;
     use crate::metrics::histogram::{exponential_buckets, Histogram, NativeHistogramConfig};
     use crate::metrics::info::Info;
-    use crate::registry::Unit;
+    use crate::registry::{Registry, Unit};
     use std::borrow::Cow;
     use std::collections::HashSet;
     use std::sync::atomic::AtomicI64;
